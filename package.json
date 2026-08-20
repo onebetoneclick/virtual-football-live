@@ -1,0 +1,17 @@
+{
+  "name": "virtual-football-live",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Virtual football live-match prototype with WebSocket updates.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  }
+}
