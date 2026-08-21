@@ -1,115 +1,37 @@
-const MatchEngine = require('../match/match-engine');
+const MatchEngine = require('../match/match-engine-v2');
 const { clubs } = require('../data/clubs');
 
 function makeRoundRobin(clubList) {
-  const teams = [...clubList];
-  if (teams.length % 2) teams.push(null);
-  const rounds = teams.length - 1;
-  const half = teams.length / 2;
-  const schedule = [];
-  let rotation = [...teams];
-
-  for (let round = 0; round < rounds; round += 1) {
-    const fixtures = [];
-    for (let i = 0; i < half; i += 1) {
-      const a = rotation[i];
-      const b = rotation[rotation.length - 1 - i];
-      if (!a || !b) continue;
-      fixtures.push({
-        id: `W${round + 1}-${fixtures.length + 1}`,
-        week: round + 1,
-        home: round % 2 === 0 ? a : b,
-        away: round % 2 === 0 ? b : a
-      });
+  const teams=[...clubList]; if(teams.length%2)teams.push(null); const rounds=teams.length-1,half=teams.length/2,schedule=[]; let rotation=[...teams];
+  for(let round=0;round<rounds;round++){
+    const fixtures=[];
+    for(let i=0;i<half;i++){
+      const a=rotation[i],b=rotation[rotation.length-1-i]; if(!a||!b)continue;
+      fixtures.push({id:`W${round+1}-${fixtures.length+1}`,week:round+1,home:round%2===0?a:b,away:round%2===0?b:a});
     }
-    schedule.push(fixtures);
-    rotation = [rotation[0], rotation[rotation.length - 1], ...rotation.slice(1, -1)];
+    schedule.push(fixtures);rotation=[rotation[0],rotation[rotation.length-1],...rotation.slice(1,-1)];
   }
   return schedule;
 }
 
 class SeasonEngine {
-  constructor(options = {}) {
-    this.leagueId = options.leagueId || 'england';
-    this.week = options.week || 1;
-    this.fixtures = makeRoundRobin(clubs.filter(c => c.leagueId === this.leagueId));
-    this.matches = [];
-    this.status = 'scheduled';
-    this.standings = this.createStandings();
-    this.poller = null;
+  constructor(options={}){
+    this.leagueId=options.leagueId||'england';this.week=options.week||1;
+    this.fixtures=makeRoundRobin(clubs.filter(c=>c.leagueId===this.leagueId));
+    this.matches=[];this.status='scheduled';this.standings=this.createStandings();this.poller=null;
   }
-
-  createStandings() {
-    const table = {};
-    clubs.filter(c => c.leagueId === this.leagueId).forEach(club => {
-      table[club.id] = { clubId: club.id, club: club.name, logo: club.logo, played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, gd: 0, points: 0 };
-    });
-    return table;
+  createStandings(){const t={};clubs.filter(c=>c.leagueId===this.leagueId).forEach(c=>t[c.id]={clubId:c.id,club:c.name,logo:c.logo,played:0,won:0,drawn:0,lost:0,gf:0,ga:0,gd:0,points:0});return t;}
+  getWeekFixtures(w=this.week){return this.fixtures[w-1]||[];}
+  startWeek(w=this.week){
+    if(this.status==='running')return;const fixtures=this.getWeekFixtures(w);if(!fixtures.length)return;
+    this.week=w;this.matches=fixtures.map(f=>({fixture:f,engine:new MatchEngine({homeClub:f.home,awayClub:f.away})}));this.status='running';
+    this.matches.forEach(x=>x.engine.start());if(!this.poller)this.poller=setInterval(()=>this.checkWeek(),1000);
   }
-
-  getWeekFixtures(week = this.week) { return this.fixtures[week - 1] || []; }
-
-  startWeek(week = this.week) {
-    if (this.status === 'running') return;
-    const fixtures = this.getWeekFixtures(week);
-    if (!fixtures.length) return;
-    this.week = week;
-    this.matches = fixtures.map(fixture => ({ fixture, engine: new MatchEngine({ homeClub: fixture.home, awayClub: fixture.away }) }));
-    this.status = 'running';
-    this.matches.forEach(item => item.engine.start());
-    if (!this.poller) this.poller = setInterval(() => this.checkWeek(), 1000);
-  }
-
-  checkWeek() {
-    if (this.status !== 'running') return;
-    if (!this.matches.every(item => item.engine.getState().status === 'finished')) return;
-    this.matches.forEach(item => this.applyResult(item.engine.getState()));
-    this.status = 'week_complete';
-  }
-
-  findStanding(teamName) {
-    return Object.values(this.standings).find(row => row.club === teamName);
-  }
-
-  applyResult(state) {
-    if (state._counted) return;
-    const home = this.findStanding(state.homeTeam);
-    const away = this.findStanding(state.awayTeam);
-    if (!home || !away) return;
-    const hg = state.score.home;
-    const ag = state.score.away;
-    home.played += 1; away.played += 1;
-    home.gf += hg; home.ga += ag; away.gf += ag; away.ga += hg;
-    if (hg > ag) { home.won += 1; home.points += 3; away.lost += 1; }
-    else if (hg < ag) { away.won += 1; away.points += 3; home.lost += 1; }
-    else { home.drawn += 1; away.drawn += 1; home.points += 1; away.points += 1; }
-    home.gd = home.gf - home.ga;
-    away.gd = away.gf - away.ga;
-    state._counted = true;
-  }
-
-  standingsList() {
-    return Object.values(this.standings).sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf || a.club.localeCompare(b.club));
-  }
-
-  weekState() {
-    return {
-      league: this.leagueId,
-      week: this.week,
-      status: this.status,
-      matches: this.matches.map(({ fixture, engine }) => {
-        const state = engine.getState();
-        return { id: fixture.id, home: state.homeTeam, away: state.awayTeam, homeLogo: state.homeLogo, awayLogo: state.awayLogo, score: state.score, status: state.status, clock: state.displayClock };
-      }),
-      standings: this.standingsList(),
-      nextWeek: this.week < this.fixtures.length ? this.week + 1 : null
-    };
-  }
-
-  selectedState(index = 0) {
-    const item = this.matches[index] || this.matches[0];
-    return item ? item.engine.getState() : null;
-  }
+  checkWeek(){if(this.status!=='running')return;if(!this.matches.every(x=>x.engine.getState().status==='finished'))return;this.matches.forEach(x=>this.applyResult(x.engine.getState()));this.status='week_complete';}
+  findStanding(n){return Object.values(this.standings).find(x=>x.club===n);}
+  applyResult(s){if(s._counted)return;const h=this.findStanding(s.homeTeam),a=this.findStanding(s.awayTeam);if(!h||!a)return;const hg=s.score.home,ag=s.score.away;h.played++;a.played++;h.gf+=hg;h.ga+=ag;a.gf+=ag;a.ga+=hg;if(hg>ag){h.won++;h.points+=3;a.lost++;}else if(hg<ag){a.won++;a.points+=3;h.lost++;}else{h.drawn++;a.drawn++;h.points++;a.points++;}h.gd=h.gf-h.ga;a.gd=a.gf-a.ga;s._counted=true;}
+  standingsList(){return Object.values(this.standings).sort((a,b)=>b.points-a.points||b.gd-a.gd||b.gf-a.gf||a.club.localeCompare(b.club));}
+  weekState(){return {league:this.leagueId,week:this.week,status:this.status,matches:this.matches.map(({fixture,engine})=>{const s=engine.getState();return{id:fixture.id,home:s.homeTeam,away:s.awayTeam,homeLogo:s.homeLogo,awayLogo:s.awayLogo,score:s.score,status:s.status,clock:s.displayClock,lastEvent:s.lastEvent};}),standings:this.standingsList(),nextWeek:this.week<this.fixtures.length?this.week+1:null};}
+  selectedState(index=0){const x=this.matches[index]||this.matches[0];return x?x.engine.getState():null;}
 }
-
-module.exports = { SeasonEngine, makeRoundRobin };
+module.exports={SeasonEngine,makeRoundRobin};
