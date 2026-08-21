@@ -1,10 +1,10 @@
 const { WebSocketServer } = require('ws');
-const MatchEngine = require('../match/match-engine');
+const { SeasonEngine } = require('../competition/season-engine');
 
 function createLiveWebSocketServer(server, options = {}) {
   const path = options.path || '/ws/live';
   const wss = new WebSocketServer({ server, path });
-  const matchEngine = new MatchEngine(options.match || {});
+  const season = new SeasonEngine({ leagueId: options.leagueId || 'england', week: 1 });
   let broadcastTimer = null;
 
   function broadcast(message) {
@@ -17,33 +17,62 @@ function createLiveWebSocketServer(server, options = {}) {
   function startBroadcastLoop() {
     if (broadcastTimer) return;
     broadcastTimer = setInterval(() => {
-      broadcast({ type: 'live_state', data: matchEngine.getState() });
-      if (matchEngine.getState().status === 'finished') {
+      const selected = season.selectedState(0);
+      broadcast({ type: 'week_state', data: season.weekState() });
+      if (selected) broadcast({ type: 'live_state', data: selected });
+
+      if (season.status === 'week_complete') {
         clearInterval(broadcastTimer);
         broadcastTimer = null;
+        broadcast({ type: 'week_complete', data: season.weekState() });
       }
     }, 1000);
   }
 
-  wss.on('connection', (socket) => {
+  function sendInitial(socket) {
     socket.send(JSON.stringify({
       type: 'connected',
       service: 'live-match-websocket',
-      data: matchEngine.getState()
+      data: season.selectedState(0) || {
+        status: 'not_started', period: 'first_half', clock: 0,
+        displayClock: '00:00', score: { home: 0, away: 0 }
+      }
     }));
+    socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
+  }
 
-    socket.on('message', (raw) => {
+  wss.on('connection', socket => {
+    sendInitial(socket);
+
+    socket.on('message', raw => {
       try {
         const message = JSON.parse(raw.toString());
 
         if (message.type === 'get_state') {
-          socket.send(JSON.stringify({ type: 'live_state', data: matchEngine.getState() }));
+          const selected = season.selectedState(Number(message.matchIndex || 0));
+          if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
+          socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
         }
 
-        if (message.type === 'start_match') {
-          matchEngine.start();
+        if (message.type === 'start_match' || message.type === 'start_week') {
+          season.startWeek(Number(message.week || season.week));
           startBroadcastLoop();
-          socket.send(JSON.stringify({ type: 'live_state', data: matchEngine.getState() }));
+          const selected = season.selectedState(0);
+          if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
+          socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
+        }
+
+        if (message.type === 'select_match') {
+          const selected = season.selectedState(Number(message.index || 0));
+          if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
+        }
+
+        if (message.type === 'next_week') {
+          const next = season.week + 1;
+          if (next <= season.fixtures.length && season.status === 'week_complete') {
+            season.startWeek(next);
+            startBroadcastLoop();
+          }
         }
       } catch {
         socket.send(JSON.stringify({ type: 'error', message: 'Invalid JSON message' }));
@@ -51,7 +80,7 @@ function createLiveWebSocketServer(server, options = {}) {
     });
   });
 
-  return { wss, matchEngine };
+  return { wss, season };
 }
 
 module.exports = { createLiveWebSocketServer };
