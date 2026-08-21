@@ -1,54 +1,80 @@
+const { clubsById } = require('../data/clubs');
+
 class MatchEngine {
   constructor(options = {}) {
-    this.duration = 180; // Internal simulation: 3 minutes.
-    this.halfTime = 90; // Internal 90 seconds = displayed 45:00.
+    this.duration = options.duration || 180;
+    this.halfTime = this.duration / 2;
     this.tickMs = options.tickMs || 1000;
     this.interval = null;
 
-    this.homeTeam = options.homeTeam || 'Manchester City';
-    this.awayTeam = options.awayTeam || 'Arsenal';
+    this.homeClub = options.homeClub || this.getDefaultClub('england');
+    this.awayClub = options.awayClub || this.getDefaultClub('england', this.homeClub.id);
+
+    this.homeTeam = this.homeClub.name;
+    this.awayTeam = this.awayClub.name;
 
     this.players = this.createPlayers();
-
     this.state = {
       status: 'not_started',
       period: 'first_half',
       clock: 0,
       displayClock: '00:00',
       score: { home: 0, away: 0 },
-      ball: { x: 50, y: 50, holder: null },
+      homeTeam: this.homeTeam,
+      awayTeam: this.awayTeam,
+      homeLogo: this.homeClub.logo,
+      awayLogo: this.awayClub.logo,
       players: this.players,
+      ball: { x: 50, y: 50, holder: null },
       commentary: [],
       goal: null
     };
   }
 
-  createPlayers() {
-    const makeTeam = (team, side) => {
-      const names = side === 'home'
-        ? ['Ederson', 'Walker', 'Dias', 'Gvardiol', 'Rodri', 'De Bruyne', 'Foden', 'Doku', 'Haaland', 'Grealish', 'Bernardo']
-        : ['Raya', 'White', 'Saliba', 'Gabriel', 'Timber', 'Odegaard', 'Rice', 'Saka', 'Martinelli', 'Havertz', 'Jesus'];
+  getDefaultClub(leagueId, excludeId = null) {
+    const clubs = Object.values(clubsById).filter(c => c.leagueId === leagueId);
+    return clubs.find(c => c.id !== excludeId) || clubs[0];
+  }
 
-      return names.map((name, index) => ({
-        id: `${side}-${index + 1}`,
-        name,
-        team,
-        x: side === 'home' ? 15 + (index % 6) * 11 : 45 + (index % 6) * 9,
-        y: 12 + Math.floor(index / 6) * 38,
-        role: index === 8 ? 'forward' : index === 0 ? 'goalkeeper' : 'player'
-      }));
+  createPlayers() {
+    const makeTeam = (club, side) => {
+      const squad = club.squad || [];
+      const starting = squad.slice(0, 11);
+      const formation = [
+        [7, 50],
+        [18, 25], [18, 42], [18, 58], [18, 75],
+        [38, 25], [38, 45], [38, 65],
+        [62, 30], [62, 55], [78, 50]
+      ];
+
+      return starting.map((player, index) => {
+        const [homeX, y] = formation[index];
+        const x = side === 'home' ? homeX : 100 - homeX;
+        return {
+          id: `${side}-${player.id}`,
+          clubId: club.id,
+          name: player.name,
+          number: player.number,
+          position: player.position,
+          rating: player.rating,
+          team: club.name,
+          side,
+          x,
+          y,
+          targetX: x,
+          targetY: y
+        };
+      });
     };
 
-    return [...makeTeam(this.homeTeam, 'home'), ...makeTeam(this.awayTeam, 'away')];
+    return [...makeTeam(this.homeClub, 'home'), ...makeTeam(this.awayClub, 'away')];
   }
 
   start() {
-    if (this.state.status === 'finished') return;
-    if (this.interval) return;
-
+    if (this.state.status === 'finished' || this.interval) return;
     this.state.status = 'running';
-    this.addCommentary(`Match started: ${this.homeTeam} vs ${this.awayTeam}`);
-
+    this.addCommentary(`KICK OFF — ${this.homeTeam} vs ${this.awayTeam}`);
+    this.assignPossession(this.getPlayerBySide('home'));
     this.interval = setInterval(() => this.tick(), this.tickMs);
   }
 
@@ -63,34 +89,31 @@ class MatchEngine {
       this.state.period = 'full_time';
       this.state.displayClock = '90:00';
       this.state.goal = null;
-      this.addCommentary(`FULL TIME: ${this.homeTeam} ${this.state.score.home} - ${this.state.score.away} ${this.awayTeam}`);
+      this.addCommentary(`FULL TIME — ${this.homeTeam} ${this.state.score.home} - ${this.state.score.away} ${this.awayTeam}`);
       this.stop();
       return;
     }
 
     this.state.clock += 1;
+    this.state.displayClock = this.getDisplayClock();
 
     if (this.state.clock < this.halfTime) {
       this.state.period = 'first_half';
     } else if (this.state.clock === this.halfTime) {
       this.state.period = 'half_time';
       this.addCommentary('HALF TIME');
+      return;
     } else {
       this.state.period = 'second_half';
     }
 
-    this.state.displayClock = this.getDisplayClock();
     this.state.goal = null;
-
-    if (this.state.period !== 'half_time') {
-      this.movePlayers();
-      this.moveBall();
-      this.simulateEvent();
-    }
+    this.movePlayers();
+    this.simulatePossessionAndBall();
+    this.simulateEvent();
   }
 
   getDisplayClock() {
-    // 180 internal seconds are mapped to a normal 90-minute football clock.
     const footballSeconds = Math.min(90 * 60, this.state.clock * 30);
     const minutes = Math.floor(footballSeconds / 60);
     const seconds = footballSeconds % 60;
@@ -98,70 +121,121 @@ class MatchEngine {
   }
 
   movePlayers() {
+    const holder = this.getHolder();
+
     for (const player of this.players) {
-      const dx = (Math.random() - 0.5) * 4;
-      const dy = (Math.random() - 0.5) * 4;
-      player.x = Math.max(3, Math.min(97, player.x + dx));
-      player.y = Math.max(5, Math.min(95, player.y + dy));
+      const isHolder = holder && player.id === holder.id;
+      const homeDirection = player.side === 'home' ? 1 : -1;
+      const attackingBias = isHolder ? 2.8 * homeDirection : 0.7 * homeDirection;
+
+      const randomX = (Math.random() - 0.5) * (isHolder ? 5 : 2.5);
+      const randomY = (Math.random() - 0.5) * (isHolder ? 5 : 2.5);
+
+      player.targetX = Math.max(3, Math.min(97, player.targetX + randomX + attackingBias));
+      player.targetY = Math.max(5, Math.min(95, player.targetY + randomY));
+
+      player.x += (player.targetX - player.x) * 0.55;
+      player.y += (player.targetY - player.y) * 0.55;
     }
   }
 
-  moveBall() {
-    let holder = this.players.find((p) => p.id === this.state.ball.holder);
+  simulatePossessionAndBall() {
+    let holder = this.getHolder();
+    const pressure = Math.random();
 
-    if (!holder || Math.random() < 0.25) {
-      holder = this.players[Math.floor(Math.random() * this.players.length)];
-      this.state.ball.holder = holder.id;
-      this.addCommentary(`${holder.name} (${holder.team}) has the ball`);
+    if (!holder || pressure < 0.18) {
+      const sameTeam = holder
+        ? this.players.filter(p => p.side === holder.side)
+        : this.players.filter(p => p.side === 'home');
+      const receiver = sameTeam[Math.floor(Math.random() * sameTeam.length)];
+
+      if (receiver) {
+        if (holder && holder.id !== receiver.id) {
+          this.addCommentary(`${holder.name} passes to ${receiver.name}`);
+        }
+        holder = receiver;
+        this.assignPossession(holder);
+      }
     }
 
-    this.state.ball.x = Math.max(2, Math.min(98, holder.x + (Math.random() - 0.5) * 6));
-    this.state.ball.y = Math.max(3, Math.min(97, holder.y + (Math.random() - 0.5) * 6));
+    if (holder) {
+      this.state.ball.x = Math.max(2, Math.min(98, holder.x));
+      this.state.ball.y = Math.max(3, Math.min(97, holder.y));
+    }
   }
 
   simulateEvent() {
     const chance = Math.random();
+    const holder = this.getHolder();
+    if (!holder) return;
 
-    if (chance < 0.018) {
-      this.scoreGoal();
-    } else if (chance < 0.055) {
-      const holder = this.getHolder();
+    if (chance < 0.025) {
+      this.attemptGoal(holder);
+    } else if (chance < 0.075) {
       this.addCommentary(`${holder.name} drives forward for ${holder.team}`);
-    } else if (chance < 0.085) {
-      const holder = this.getHolder();
+    } else if (chance < 0.11) {
       this.addCommentary(`${holder.name} attempts a shot`);
+    } else if (chance < 0.16) {
+      this.addCommentary(`${holder.name} is looking for a teammate`);
     }
   }
 
-  getHolder() {
-    return this.players.find((p) => p.id === this.state.ball.holder) || this.players[0];
+  attemptGoal(shooter) {
+    const attackStrength = shooter.rating + Math.random() * 30;
+    const goalkeeper = this.players.find(p => p.side !== shooter.side && p.position === 'GK');
+    const keeperStrength = goalkeeper ? goalkeeper.rating + Math.random() * 30 : 75;
+
+    this.addCommentary(`${shooter.name} shoots from ${this.state.displayClock}`);
+
+    if (attackStrength > keeperStrength + 8) {
+      this.scoreGoal(shooter);
+    } else {
+      this.addCommentary(`${goalkeeper ? goalkeeper.name : 'The goalkeeper'} makes the save`);
+      this.state.ball.x = goalkeeper ? goalkeeper.x : (shooter.side === 'home' ? 93 : 7);
+      this.state.ball.y = goalkeeper ? goalkeeper.y : 50;
+    }
   }
 
-  scoreGoal() {
-    const holder = this.getHolder();
-    const side = holder.team === this.homeTeam ? 'home' : 'away';
+  scoreGoal(scorer) {
+    const side = scorer.side;
     const team = side === 'home' ? this.homeTeam : this.awayTeam;
 
     this.state.score[side] += 1;
     this.state.ball.x = side === 'home' ? 96 : 4;
     this.state.ball.y = 50;
+
     this.state.goal = {
       team,
-      scorer: holder.name,
+      scorer: scorer.name,
       score: `${this.state.score.home} - ${this.state.score.away}`,
       clock: this.state.displayClock,
-      description: `${holder.name} finishes the attack and sends the ball into the net.`
+      description: `${scorer.name} scores for ${team} after a virtual attacking move.`
     };
 
-    this.addCommentary(`GOAL! ${team} — ${holder.name} scores. ${this.state.score.home} - ${this.state.score.away}`);
+    this.addCommentary(`GOAL! ${team} — ${scorer.name} scores. ${this.state.score.home} - ${this.state.score.away}`);
   }
 
-  addCommentary(message) {
+  assignPossession(player) {
+    if (!player) return;
+    this.state.ball.holder = player.id;
+    this.state.ball.x = player.x;
+    this.state.ball.y = player.y;
+  }
+
+  getHolder() {
+    return this.players.find(p => p.id === this.state.ball.holder) || null;
+  }
+
+  getPlayerBySide(side) {
+    return this.players.find(p => p.side === side && p.position !== 'GK') || this.players.find(p => p.side === side);
+  }
+
+  addCommentary(text) {
     this.state.commentary.unshift({
-      text: message,
+      text,
       time: this.state.displayClock
     });
-    this.state.commentary = this.state.commentary.slice(0, 20);
+    this.state.commentary = this.state.commentary.slice(0, 30);
   }
 
   getState() {
