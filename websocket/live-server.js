@@ -17,22 +17,34 @@ function createLiveWebSocketServer(server, options = {}) {
   }
 
   function probabilityState() {
-    return season.matches.map(({ fixture, engine }) => {
+    return season.matches.map(({ fixture, engine }, index) => {
       const state = engine.getState();
+      const probabilities = probabilityEngine.calculate(state);
+
       return {
-        matchId: fixture.id,
-        home: state.homeTeam,
-        away: state.awayTeam,
-        homeLogo: state.homeLogo,
-        awayLogo: state.awayLogo,
+        matchId: fixture.id || `W${season.week}-${index + 1}`,
+        home: {
+          club: state.homeTeam,
+          logo: state.homeLogo || fixture.homeLogo || fixture.home?.logo || '',
+          probability: probabilities.home.probability
+        },
+        draw: {
+          probability: probabilities.draw.probability
+        },
+        away: {
+          club: state.awayTeam,
+          logo: state.awayLogo || fixture.awayLogo || fixture.away?.logo || '',
+          probability: probabilities.away.probability
+        },
         score: state.score,
-        probabilities: probabilityEngine.calculate(state)
+        updatedAt: probabilities.updatedAt
       };
     });
   }
 
   function startBroadcastLoop() {
     if (broadcastTimer) return;
+
     broadcastTimer = setInterval(() => {
       broadcast({ type: 'week_state', data: season.weekState() });
       broadcast({ type: 'match_probabilities', data: probabilityState() });
@@ -48,7 +60,6 @@ function createLiveWebSocketServer(server, options = {}) {
     }, 1000);
   }
 
-  // Start automatically when the server is ready.
   season.startWeek(season.week);
   startBroadcastLoop();
 
