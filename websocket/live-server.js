@@ -1,5 +1,5 @@
 const { WebSocketServer } = require('ws');
-const { createMatchEngine } = require('../match/match-engine');
+const MatchEngine = require('../match/match-engine');
 
 /**
  * Dedicated live WebSocket service.
@@ -9,8 +9,7 @@ function createLiveWebSocketServer(server, options = {}) {
   const path = options.path || '/ws/live';
   const wss = new WebSocketServer({ server, path });
 
-  const matchEngine = createMatchEngine();
-  const state = matchEngine.getState();
+  const matchEngine = new MatchEngine();
 
   function broadcast(message) {
     const payload = JSON.stringify(message);
@@ -22,18 +21,29 @@ function createLiveWebSocketServer(server, options = {}) {
     }
   }
 
-  matchEngine.onUpdate((updatedState) => {
-    broadcast({
-      type: 'live_state',
-      data: updatedState
-    });
-  });
+  let broadcastTimer = null;
+
+  function startBroadcastLoop() {
+    if (broadcastTimer) return;
+
+    broadcastTimer = setInterval(() => {
+      broadcast({
+        type: 'live_state',
+        data: matchEngine.getState()
+      });
+
+      if (matchEngine.getState().status === 'finished') {
+        clearInterval(broadcastTimer);
+        broadcastTimer = null;
+      }
+    }, 1000);
+  }
 
   wss.on('connection', (socket) => {
     socket.send(JSON.stringify({
       type: 'connected',
       service: 'live-match-websocket',
-      data: state
+      data: matchEngine.getState()
     }));
 
     socket.on('message', (raw) => {
@@ -49,6 +59,12 @@ function createLiveWebSocketServer(server, options = {}) {
 
         if (message.type === 'start_match') {
           matchEngine.start();
+          startBroadcastLoop();
+
+          socket.send(JSON.stringify({
+            type: 'live_state',
+            data: matchEngine.getState()
+          }));
         }
       } catch {
         socket.send(JSON.stringify({
