@@ -1,10 +1,12 @@
 const { WebSocketServer } = require('ws');
 const { SeasonEngine } = require('../competition/season-engine');
+const ProbabilityEngine = require('../match/probability-engine');
 
 function createLiveWebSocketServer(server, options = {}) {
   const path = options.path || '/ws/live';
   const wss = new WebSocketServer({ server, path });
   const season = new SeasonEngine({ leagueId: options.leagueId || 'england', week: 1 });
+  const probabilityEngine = new ProbabilityEngine({ updateEveryMs: 1000 });
   let broadcastTimer = null;
 
   function broadcast(message) {
@@ -14,11 +16,28 @@ function createLiveWebSocketServer(server, options = {}) {
     }
   }
 
+  function probabilityState() {
+    return season.matches.map(({ fixture, engine }) => {
+      const state = engine.getState();
+      return {
+        matchId: fixture.id,
+        home: state.homeTeam,
+        away: state.awayTeam,
+        homeLogo: state.homeLogo,
+        awayLogo: state.awayLogo,
+        score: state.score,
+        probabilities: probabilityEngine.calculate(state)
+      };
+    });
+  }
+
   function startBroadcastLoop() {
     if (broadcastTimer) return;
     broadcastTimer = setInterval(() => {
-      const selected = season.selectedState(0);
       broadcast({ type: 'week_state', data: season.weekState() });
+      broadcast({ type: 'match_probabilities', data: probabilityState() });
+
+      const selected = season.selectedState(0);
       if (selected) broadcast({ type: 'live_state', data: selected });
 
       if (season.status === 'week_complete') {
@@ -28,6 +47,10 @@ function createLiveWebSocketServer(server, options = {}) {
       }
     }, 1000);
   }
+
+  // Start automatically when the server is ready.
+  season.startWeek(season.week);
+  startBroadcastLoop();
 
   function sendInitial(socket) {
     socket.send(JSON.stringify({
@@ -39,6 +62,7 @@ function createLiveWebSocketServer(server, options = {}) {
       }
     }));
     socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
+    socket.send(JSON.stringify({ type: 'match_probabilities', data: probabilityState() }));
   }
 
   wss.on('connection', socket => {
@@ -52,6 +76,7 @@ function createLiveWebSocketServer(server, options = {}) {
           const selected = season.selectedState(Number(message.matchIndex || 0));
           if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
           socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
+          socket.send(JSON.stringify({ type: 'match_probabilities', data: probabilityState() }));
         }
 
         if (message.type === 'start_match' || message.type === 'start_week') {
@@ -60,11 +85,13 @@ function createLiveWebSocketServer(server, options = {}) {
           const selected = season.selectedState(0);
           if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
           socket.send(JSON.stringify({ type: 'week_state', data: season.weekState() }));
+          socket.send(JSON.stringify({ type: 'match_probabilities', data: probabilityState() }));
         }
 
         if (message.type === 'select_match') {
           const selected = season.selectedState(Number(message.index || 0));
           if (selected) socket.send(JSON.stringify({ type: 'live_state', data: selected }));
+          socket.send(JSON.stringify({ type: 'match_probabilities', data: probabilityState() }));
         }
 
         if (message.type === 'next_week') {
