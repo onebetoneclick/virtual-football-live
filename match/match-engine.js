@@ -6,6 +6,8 @@ class MatchEngine {
     this.halfTime = this.duration / 2;
     this.tickMs = options.tickMs || 1000;
     this.interval = null;
+    this.goalResetTicks = 0;
+    this.kickoffSide = 'home';
 
     this.homeClub = options.homeClub || this.getDefaultClub('england');
     this.awayClub = options.awayClub || this.getDefaultClub('england', this.homeClub.id);
@@ -38,42 +40,35 @@ class MatchEngine {
 
   normalizeRole(position) {
     const value = String(position || '').toUpperCase();
-
     if (value.includes('GK') || value.includes('GOALKEEP')) return 'GK';
     if (value.includes('DEF') || value.includes('BACK')) return 'DEF';
     if (value.includes('MID')) return 'MID';
     if (value.includes('FWD') || value.includes('FORWARD') || value.includes('ST') || value.includes('CF') || value.includes('WING')) return 'FWD';
-
     return 'MID';
   }
 
   createPlayers() {
-    const makeTeam = (club, side) => {
-      const squad = club.squad || [];
-      const starting = squad.slice(0, 11);
+    const formation = [
+      { role: 'GK', x: 6, y: 50 },
+      { role: 'DEF', x: 18, y: 18 },
+      { role: 'DEF', x: 16, y: 40 },
+      { role: 'DEF', x: 16, y: 60 },
+      { role: 'DEF', x: 18, y: 82 },
+      { role: 'MID', x: 34, y: 20 },
+      { role: 'MID', x: 38, y: 45 },
+      { role: 'MID', x: 34, y: 75 },
+      { role: 'FWD', x: 58, y: 25 },
+      { role: 'FWD', x: 64, y: 50 },
+      { role: 'FWD', x: 58, y: 75 }
+    ];
 
-      // Tactical home positions. Away positions are mirrored.
-      // GK stays deepest, defenders stay behind midfielders,
-      // midfielders connect the lines, and forwards stay highest.
-      const formation = [
-        { role: 'GK',  x: 7,  y: 50 },
-        { role: 'DEF', x: 18, y: 20 },
-        { role: 'DEF', x: 18, y: 40 },
-        { role: 'DEF', x: 18, y: 60 },
-        { role: 'DEF', x: 18, y: 80 },
-        { role: 'MID', x: 38, y: 25 },
-        { role: 'MID', x: 38, y: 50 },
-        { role: 'MID', x: 38, y: 75 },
-        { role: 'FWD', x: 62, y: 25 },
-        { role: 'FWD', x: 66, y: 50 },
-        { role: 'FWD', x: 62, y: 75 }
-      ];
+    const makeTeam = (club, side) => {
+      const starting = (club.squad || []).slice(0, 11);
 
       return starting.map((player, index) => {
         const tactical = formation[index];
+        const x = side === 'home' ? tactical.x : 100 - tactical.x;
         const role = this.normalizeRole(player.position);
-        const baseX = tactical.x;
-        const x = side === 'home' ? baseX : 100 - baseX;
 
         return {
           id: `${side}-${player.id}`,
@@ -92,7 +87,11 @@ class MatchEngine {
           targetX: x,
           targetY: tactical.y,
           dribbling: false,
-          attacking: false
+          attacking: false,
+          hasBall: false,
+          stamina: 100,
+          seed: Math.random() * 100,
+          nextDecision: 0
         };
       });
     };
@@ -108,7 +107,7 @@ class MatchEngine {
 
     this.state.status = 'running';
     this.addCommentary(`KICK OFF — ${this.homeTeam} vs ${this.awayTeam}`);
-    this.assignPossession(this.getPlayerBySide('home'));
+    this.prepareKickoff('home');
     this.interval = setInterval(() => this.tick(), this.tickMs);
   }
 
@@ -123,6 +122,7 @@ class MatchEngine {
       this.state.period = 'full_time';
       this.state.displayClock = '90:00';
       this.state.goal = null;
+      this.resetPlayersToShape();
       this.addCommentary(`FULL TIME — ${this.homeTeam} ${this.state.score.home} - ${this.state.score.away} ${this.awayTeam}`);
       this.stop();
       return;
@@ -143,9 +143,18 @@ class MatchEngine {
     }
 
     this.state.goal = null;
-    this.movePlayersTactically();
+
+    if (this.goalResetTicks > 0) {
+      this.goalResetTicks -= 1;
+      this.movePlayersForRestart();
+      if (this.goalResetTicks === 0) this.prepareKickoff(this.kickoffSide);
+      return;
+    }
+
+    this.movePlayersLikeFootball();
     this.simulatePossessionAndBall();
     this.simulateEvent();
+    this.updateBallFromHolder();
   }
 
   getDisplayClock() {
@@ -159,232 +168,263 @@ class MatchEngine {
     return side === 'home' ? 1 : -1;
   }
 
-  getTacticalLimits(player) {
-    const direction = this.getAttackDirection(player.side);
-
-    if (player.role === 'GK') {
-      return {
-        minX: direction === 1 ? 3 : 72,
-        maxX: direction === 1 ? 18 : 97,
-        minY: 35,
-        maxY: 65
-      };
-    }
-
-    if (player.role === 'DEF') {
-      return {
-        minX: direction === 1 ? 8 : 58,
-        maxX: direction === 1 ? 38 : 92,
-        minY: 10,
-        maxY: 90
-      };
-    }
-
-    if (player.role === 'MID') {
-      return {
-        minX: direction === 1 ? 22 : 42,
-        maxX: direction === 1 ? 62 : 78,
-        minY: 8,
-        maxY: 92
-      };
-    }
-
-    // Forwards are the players allowed to move furthest forward.
-    return {
-      minX: direction === 1 ? 42 : 58,
-      maxX: direction === 1 ? 96 : 58,
-      minY: 5,
-      maxY: 95
-    };
-  }
-
   clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
 
-  moveTowards(player, targetX, targetY, speed = 0.35) {
-    const limits = this.getTacticalLimits(player);
-    const x = this.clamp(targetX, limits.minX, limits.maxX);
-    const y = this.clamp(targetY, limits.minY, limits.maxY);
-
+  moveTowards(player, targetX, targetY, speed = 0.3) {
+    const x = this.clamp(targetX, 2, 98);
+    const y = this.clamp(targetY, 4, 96);
     player.targetX = x;
     player.targetY = y;
     player.x += (x - player.x) * speed;
     player.y += (y - player.y) * speed;
   }
 
-  movePlayersTactically() {
+  getNearestOpponent(player) {
+    let nearest = null;
+    let distance = Infinity;
+    for (const other of this.players) {
+      if (other.side === player.side) continue;
+      const d = Math.hypot(other.x - player.x, other.y - player.y);
+      if (d < distance) {
+        distance = d;
+        nearest = other;
+      }
+    }
+    return { player: nearest, distance };
+  }
+
+  getTeamPlayers(side) {
+    return this.players.filter(p => p.side === side);
+  }
+
+  getHolder() {
+    return this.players.find(p => p.id === this.state.ball.holder) || null;
+  }
+
+  getGoalX(side) {
+    return side === 'home' ? 98 : 2;
+  }
+
+  getPlayerBySide(side) {
+    return this.players.find(p => p.side === side && p.role === 'MID')
+      || this.players.find(p => p.side === side && p.role === 'FWD')
+      || this.players.find(p => p.side === side && p.role === 'DEF')
+      || this.players.find(p => p.side === side);
+  }
+
+  getRoleWeight(role) {
+    if (role === 'FWD') return 1.0;
+    if (role === 'MID') return 0.9;
+    if (role === 'DEF') return 0.7;
+    return 0.3;
+  }
+
+  movePlayersLikeFootball() {
     const holder = this.getHolder();
     const ballX = this.state.ball.x;
     const ballY = this.state.ball.y;
 
     for (const player of this.players) {
       const direction = this.getAttackDirection(player.side);
-      const isHolder = holder && player.id === holder.id;
+      const ownGoal = player.side === 'home' ? 0 : 100;
+      const opponentGoal = this.getGoalX(player.side);
       const sameTeamHasBall = holder && holder.side === player.side;
       const opponentHasBall = holder && holder.side !== player.side;
+      const isHolder = holder && holder.id === player.id;
 
       player.dribbling = false;
       player.attacking = false;
+      player.hasBall = Boolean(isHolder);
 
       if (player.role === 'GK') {
-        // Goalkeepers stay in their penalty area and shift with the ball.
-        const keeperX = direction === 1
-          ? this.clamp(7 + (ballX - 50) * 0.04, 5, 13)
-          : this.clamp(93 + (ballX - 50) * 0.04, 87, 95);
-        const keeperY = this.clamp(50 + (ballY - 50) * 0.25, 40, 60);
-        this.moveTowards(player, keeperX, keeperY, 0.25);
+        // The keeper can leave the goal area to collect a loose ball, but never wanders randomly.
+        const ballInDanger = Math.abs(ballX - ownGoal) < 18;
+        const targetX = ballInDanger && !holder
+          ? this.clamp(ballX, player.side === 'home' ? 5 : 78, player.side === 'home' ? 22 : 95)
+          : (player.side === 'home' ? 6 : 94);
+        const targetY = this.clamp(50 + (ballY - 50) * 0.35, 35, 65);
+        this.moveTowards(player, targetX, targetY, 0.25);
         continue;
       }
 
-      // Basic tactical shape around the player's assigned position.
+      // Every player has an individual target. The ball and opponents influence it,
+      // but the player keeps his own movement rhythm so the two teams never mirror each other.
       let targetX = player.baseX;
       let targetY = player.baseY;
+      const timeWave = Math.sin((this.state.clock + player.seed) * 0.17);
+      const laneWave = Math.cos((this.state.clock * 0.13) + player.seed);
 
-      if (player.side === 'away') {
-        targetX = player.baseX;
+      // Team shape stretches toward the ball. It is not a hard zone: players are
+      // allowed to cross midfield and enter the opponent penalty area during attacks.
+      const ballPull = sameTeamHasBall ? 0.42 : opponentHasBall ? 0.26 : 0.16;
+      targetX += (ballX - targetX) * ballPull;
+      targetY += (ballY - targetY) * ballPull;
+
+      // Individual role tendencies, not fixed walls.
+      if (player.role === 'FWD') {
+        targetX += direction * (sameTeamHasBall ? 8 : 2) * (0.7 + Math.random() * 0.5);
+        targetY += laneWave * 8;
+        if (sameTeamHasBall) player.attacking = true;
+      } else if (player.role === 'MID') {
+        targetX += direction * (sameTeamHasBall ? 5 : 0);
+        targetY += laneWave * 6;
+        if (sameTeamHasBall) player.attacking = true;
+      } else if (player.role === 'DEF') {
+        targetX += direction * (sameTeamHasBall ? 4 : -2);
+        targetY += laneWave * 4;
+        if (sameTeamHasBall && Math.random() < 0.22) player.attacking = true;
       }
 
-      // Teammates move toward the ball, but only within their role's zone.
-      if (sameTeamHasBall) {
-        const ballInfluence = player.role === 'FWD' ? 0.30 : player.role === 'MID' ? 0.22 : 0.10;
-        targetX += (ballX - targetX) * ballInfluence;
-        targetY += (ballY - targetY) * ballInfluence;
-
-        // Midfielders are the main forward support runners.
-        if (player.role === 'MID') {
-          targetX += direction * 3;
-          player.attacking = true;
-        }
-
-        // Defenders can support the attack slightly, but do not become forwards.
-        if (player.role === 'DEF') {
-          targetX += direction * 1.2;
-        }
-      }
-
-      // When defending, players track the ball and retreat toward their shape.
+      // When defending, defenders and midfielders naturally track the dangerous side
+      // of the attack instead of standing at the back.
       if (opponentHasBall) {
-        const ballDistance = Math.abs(ballX - player.x);
-        const tracking = ballDistance < 30 ? 0.18 : 0.08;
-        targetX += (ballX - targetX) * tracking;
-        targetY += (ballY - targetY) * tracking;
-
-        if (player.role === 'DEF') {
-          targetX -= direction * 1.5;
-        }
+        const danger = Math.abs(ballX - player.x) < 35 ? 1 : 0.35;
+        targetX += (ballX - targetX) * 0.18 * danger;
+        targetY += (ballY - targetY) * 0.22 * danger;
       }
 
-      // The player with possession gets special movement.
+      // Give players independent off-ball movement so every player has his own life.
+      targetX += direction * timeWave * 2.5;
+      targetY += laneWave * 2.5;
+
       if (isHolder) {
         if (player.role === 'FWD') {
-          // Forwards dribble: carry the ball forward and change lane slightly.
+          // A forward carries the ball into open space and can run into the box.
           player.dribbling = true;
-          targetX = player.x + direction * 5.5;
-          targetY = player.y + (Math.random() - 0.5) * 7;
+          targetX = player.x + direction * (4.5 + Math.random() * 3.5);
+          targetY = player.y + (Math.random() - 0.5) * 9;
         } else if (player.role === 'MID') {
-          // Midfielders can carry forward, but less aggressively.
-          targetX = player.x + direction * 3;
-          targetY = player.y + (Math.random() - 0.5) * 4;
+          targetX = player.x + direction * (2.5 + Math.random() * 2.5);
+          targetY = player.y + (Math.random() - 0.5) * 7;
         } else {
-          // Defenders with the ball can step forward briefly, never into the striker zone.
-          targetX = player.x + direction * 1.5;
+          targetX = player.x + direction * (1.5 + Math.random() * 2);
+          targetY = player.y + (Math.random() - 0.5) * 5;
         }
       }
 
-      // Small natural movement around the tactical target.
-      targetY += (Math.random() - 0.5) * 1.8;
+      // If the ball is close to the opponent goal, attackers make runs into the box.
+      if (sameTeamHasBall && Math.abs(opponentGoal - ballX) < 28) {
+        if (player.role === 'FWD') {
+          targetX = opponentGoal - direction * (5 + Math.random() * 8);
+          targetY += (Math.random() - 0.5) * 12;
+        } else if (player.role === 'MID') {
+          targetX += direction * 8;
+        }
+      }
 
-      this.moveTowards(player, targetX, targetY, isHolder ? 0.55 : 0.28);
+      // Defenders can follow an attacking play all the way upfield when the match demands it.
+      // They are not locked to the defensive third.
+      if (sameTeamHasBall && player.role === 'DEF' && Math.abs(opponentGoal - ballX) < 22 && Math.random() < 0.15) {
+        targetX = opponentGoal - direction * (15 + Math.random() * 12);
+        targetY += (Math.random() - 0.5) * 15;
+      }
+
+      const speed = isHolder ? 0.48 : 0.22 + (player.rating || 70) / 1000;
+      this.moveTowards(player, targetX, targetY, speed);
     }
-  }
-
-  resetAfterHalf() {
-    for (const player of this.players) {
-      player.targetX = player.baseX;
-      player.targetY = player.baseY;
-      player.dribbling = false;
-      player.attacking = false;
-      player.x += (player.baseX - player.x) * 0.35;
-      player.y += (player.baseY - player.y) * 0.35;
-    }
-
-    this.state.ball.x = 50;
-    this.state.ball.y = 50;
-    this.state.ball.holder = null;
-    this.state.ball.action = 'half_time';
   }
 
   getPassTargets(holder) {
     if (!holder) return [];
 
-    return this.players.filter(player => {
-      if (player.side !== holder.side || player.id === holder.id) return false;
+    const teammates = this.getTeamPlayers(holder.side).filter(p => p.id !== holder.id && p.role !== 'GK');
+    const direction = this.getAttackDirection(holder.side);
 
-      // Defenders prefer safe passes backward/sideways.
-      if (holder.role === 'DEF') {
-        return player.role === 'DEF' || player.role === 'MID';
-      }
+    return teammates
+      .map(player => {
+        const forwardProgress = (player.x - holder.x) * direction;
+        const distance = Math.hypot(player.x - holder.x, player.y - holder.y);
+        let score = 50 - distance;
 
-      // Midfielders connect defence to attack.
-      if (holder.role === 'MID') {
-        return player.role === 'DEF' || player.role === 'MID' || player.role === 'FWD';
-      }
+        if (holder.role === 'DEF' && player.role === 'MID') score += 18;
+        if (holder.role === 'MID' && player.role === 'FWD') score += 20;
+        if (holder.role === 'FWD' && player.role === 'FWD') score += 8;
+        if (forwardProgress > 0) score += Math.min(18, forwardProgress * 0.7);
+        if (player.role === 'DEF' && holder.role === 'FWD') score -= 4;
 
-      // Forwards prefer midfield support or another forward.
-      if (holder.role === 'FWD') {
-        return player.role === 'MID' || player.role === 'FWD';
-      }
+        return { player, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map(x => x.player);
+  }
 
-      return player.role !== 'GK';
-    });
+  passTo(holder, receiver) {
+    if (!holder || !receiver) return;
+
+    this.state.ball.action = 'pass';
+    this.state.ball.holder = receiver.id;
+    this.state.ball.x = receiver.x;
+    this.state.ball.y = receiver.y;
+    this.addCommentary(`${holder.name} passes to ${receiver.name}`);
   }
 
   simulatePossessionAndBall() {
     let holder = this.getHolder();
-    const pressure = Math.random();
 
-    if (!holder || pressure < 0.14) {
-      const targets = this.getPassTargets(holder);
-      const receiver = targets.length
-        ? targets[Math.floor(Math.random() * targets.length)]
-        : this.getPlayerBySide(holder ? holder.side : 'home');
+    if (!holder) {
+      const restart = this.getPlayerBySide(this.kickoffSide);
+      if (restart) this.assignPossession(restart);
+      return;
+    }
 
-      if (receiver) {
-        if (holder && holder.id !== receiver.id) {
-          this.addCommentary(`${holder.name} passes to ${receiver.name}`);
-          this.state.ball.action = 'pass';
-        }
-        holder = receiver;
-        this.assignPossession(holder);
+    const nearestOpponent = this.getNearestOpponent(holder);
+    const pressure = nearestOpponent.distance < 13;
+    const passTargets = this.getPassTargets(holder);
+
+    // A pressured player is much more likely to release the ball.
+    const passChance = pressure ? 0.42 : (holder.role === 'FWD' ? 0.20 : 0.27);
+
+    if (passTargets.length && Math.random() < passChance) {
+      const receiver = passTargets[Math.floor(Math.random() * Math.min(3, passTargets.length))];
+      this.passTo(holder, receiver);
+      return;
+    }
+
+    // Occasionally the opponent wins the ball through pressure/tackling.
+    if (pressure && Math.random() < 0.20) {
+      const opponent = nearestOpponent.player;
+      if (opponent) {
+        this.assignPossession(opponent);
+        this.addCommentary(`${opponent.name} wins the ball for ${opponent.team}`);
+        return;
       }
     }
 
-    if (holder) {
-      if (holder.dribbling) {
-        this.state.ball.action = 'dribble';
-      }
-
-      this.state.ball.x = this.clamp(holder.x + (holder.dribbling ? this.getAttackDirection(holder.side) * 1.5 : 0), 2, 98);
-      this.state.ball.y = this.clamp(holder.y, 3, 97);
+    if (holder.dribbling) {
+      this.state.ball.action = 'dribble';
+    } else {
+      this.state.ball.action = 'control';
     }
   }
 
   simulateEvent() {
-    const chance = Math.random();
     const holder = this.getHolder();
     if (!holder) return;
 
-    if (holder.role === 'FWD' && holder.dribbling && chance < 0.16) {
-      this.addCommentary(`${holder.name} dribbles past a defender`);
-    } else if (chance < 0.025) {
+    const direction = this.getAttackDirection(holder.side);
+    const goalX = this.getGoalX(holder.side);
+    const distanceToGoal = Math.abs(goalX - holder.x);
+    const chance = Math.random();
+
+    // Shots are only common when the ball is actually in a dangerous area.
+    const shootingRange = holder.role === 'FWD' ? 35 : holder.role === 'MID' ? 27 : 18;
+
+    if ((holder.role === 'FWD' || holder.role === 'MID') && distanceToGoal < shootingRange && chance < 0.16) {
       this.attemptGoal(holder);
-    } else if (chance < 0.075) {
-      this.addCommentary(`${holder.name} drives forward for ${holder.team}`);
+      return;
+    }
+
+    if (holder.role === 'FWD' && holder.dribbling && chance < 0.20) {
+      this.addCommentary(`${holder.name} dribbles forward and beats a defender`);
+    } else if (chance < 0.055) {
+      this.addCommentary(`${holder.name} carries the ball forward for ${holder.team}`);
+    } else if (chance < 0.085) {
+      this.addCommentary(`${holder.name} looks up for a teammate`);
     } else if (chance < 0.11) {
-      this.addCommentary(`${holder.name} attempts a shot`);
-    } else if (chance < 0.16) {
-      this.addCommentary(`${holder.name} is looking for a teammate`);
+      this.addCommentary(`${holder.name} is challenged in midfield`);
     }
   }
 
@@ -394,18 +434,20 @@ class MatchEngine {
       return;
     }
 
-    const attackStrength = shooter.rating + Math.random() * 30;
     const goalkeeper = this.players.find(p => p.side !== shooter.side && p.role === 'GK');
-    const keeperStrength = goalkeeper ? goalkeeper.rating + Math.random() * 30 : 75;
+    const distanceToGoal = Math.abs(this.getGoalX(shooter.side) - shooter.x);
+    const distanceBonus = this.clamp((40 - distanceToGoal) * 0.8, 0, 20);
+    const attackStrength = (shooter.rating || 70) + distanceBonus + Math.random() * 30;
+    const keeperStrength = goalkeeper ? (goalkeeper.rating || 70) + Math.random() * 30 : 75;
 
     this.addCommentary(`${shooter.name} shoots from ${this.state.displayClock}`);
     this.state.ball.action = 'shot';
 
-    if (attackStrength > keeperStrength + 8) {
+    if (attackStrength > keeperStrength + 7) {
       this.scoreGoal(shooter);
     } else {
       this.addCommentary(`${goalkeeper ? goalkeeper.name : 'The goalkeeper'} makes the save`);
-      this.state.ball.x = goalkeeper ? goalkeeper.x : (shooter.side === 'home' ? 93 : 7);
+      this.state.ball.x = goalkeeper ? goalkeeper.x : this.getGoalX(shooter.side);
       this.state.ball.y = goalkeeper ? goalkeeper.y : 50;
       this.state.ball.holder = goalkeeper ? goalkeeper.id : null;
       this.state.ball.action = 'save';
@@ -415,9 +457,10 @@ class MatchEngine {
   scoreGoal(scorer) {
     const side = scorer.side;
     const team = side === 'home' ? this.homeTeam : this.awayTeam;
+    const otherSide = side === 'home' ? 'away' : 'home';
 
     this.state.score[side] += 1;
-    this.state.ball.x = side === 'home' ? 98 : 2;
+    this.state.ball.x = 50;
     this.state.ball.y = 50;
     this.state.ball.holder = null;
     this.state.ball.action = 'goal';
@@ -427,30 +470,85 @@ class MatchEngine {
       scorer: scorer.name,
       score: `${this.state.score.home} - ${this.state.score.away}`,
       clock: this.state.displayClock,
-      description: `${scorer.name} dribbles into the attacking area and sends the ball into the net.`
+      description: `${scorer.name} scores for ${team}. The teams reset and ${this.awayTeam === team ? this.homeTeam : this.awayTeam} will restart.`
     };
 
     this.addCommentary(`GOAL! ${team} — ${scorer.name} scores. ${this.state.score.home} - ${this.state.score.away}`);
+    this.addCommentary(`Players return toward the centre for the restart.`);
+
+    // The team that conceded gets the next kick-off, just like a normal match.
+    this.kickoffSide = otherSide;
+    this.goalResetTicks = 2;
+    this.resetPlayersToShape();
+  }
+
+  resetPlayersToShape() {
+    for (const player of this.players) {
+      player.targetX = player.baseX;
+      player.targetY = player.baseY;
+      player.dribbling = false;
+      player.attacking = false;
+      player.hasBall = false;
+      player.x += (player.baseX - player.x) * 0.55;
+      player.y += (player.baseY - player.y) * 0.55;
+    }
+  }
+
+  movePlayersForRestart() {
+    for (const player of this.players) {
+      const direction = this.getAttackDirection(player.side);
+      const centrePull = player.role === 'FWD' ? 0.65 : player.role === 'MID' ? 0.5 : 0.35;
+      const targetX = player.baseX + (50 - player.baseX) * centrePull;
+      const targetY = player.baseY + (50 - player.baseY) * (player.role === 'FWD' ? 0.2 : 0.12);
+      this.moveTowards(player, targetX, targetY, 0.35);
+      if (Math.abs(player.x - 50) < 8 && player.role === 'FWD') player.x += direction * 2;
+    }
+    this.state.ball.x = 50;
+    this.state.ball.y = 50;
+    this.state.ball.holder = null;
+    this.state.ball.action = 'restart';
+  }
+
+  prepareKickoff(side) {
+    this.kickoffSide = side;
+    this.resetPlayersToShape();
+    const kickoff = this.getTeamPlayers(side).find(p => p.role === 'MID')
+      || this.getTeamPlayers(side).find(p => p.role === 'FWD');
+    if (kickoff) {
+      kickoff.x = side === 'home' ? 49 : 51;
+      kickoff.y = 50;
+      this.assignPossession(kickoff);
+      this.state.ball.x = 50;
+      this.state.ball.y = 50;
+      this.state.ball.action = 'kickoff';
+      this.addCommentary(`KICK OFF — ${side === 'home' ? this.homeTeam : this.awayTeam}`);
+    }
+  }
+
+  resetAfterHalf() {
+    this.resetPlayersToShape();
+    this.state.ball.x = 50;
+    this.state.ball.y = 50;
+    this.state.ball.holder = null;
+    this.state.ball.action = 'half_time';
+    this.kickoffSide = 'away';
+    this.prepareKickoff('away');
   }
 
   assignPossession(player) {
     if (!player) return;
-
+    for (const p of this.players) p.hasBall = p.id === player.id;
     this.state.ball.holder = player.id;
     this.state.ball.x = player.x;
     this.state.ball.y = player.y;
     this.state.ball.action = player.role === 'FWD' ? 'dribble' : 'control';
   }
 
-  getHolder() {
-    return this.players.find(p => p.id === this.state.ball.holder) || null;
-  }
-
-  getPlayerBySide(side) {
-    return this.players.find(p => p.side === side && p.role === 'MID')
-      || this.players.find(p => p.side === side && p.role === 'FWD')
-      || this.players.find(p => p.side === side && p.role === 'DEF')
-      || this.players.find(p => p.side === side);
+  updateBallFromHolder() {
+    const holder = this.getHolder();
+    if (!holder) return;
+    this.state.ball.x = this.clamp(holder.x + (holder.dribbling ? this.getAttackDirection(holder.side) * 1.4 : 0), 2, 98);
+    this.state.ball.y = this.clamp(holder.y, 3, 97);
   }
 
   addCommentary(text) {
